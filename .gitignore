@@ -1,0 +1,8 @@
+server/data/tickets.json
+server/data/tickets.json.tmp
+server/data/tickets.db
+server/data/tickets.db-shm
+server/data/tickets.db-wal
+server/node_modules/
+it-support-tracker/node_modules/
+it-support-tracker/dist/
