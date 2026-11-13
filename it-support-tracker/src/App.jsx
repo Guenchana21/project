@@ -71,7 +71,55 @@ function NavIcon({ name }) {
     return <svg aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.7" strokeLinecap="round" strokeLinejoin="round">{icons[name]}</svg>;
 }
 
-function Sidebar({ activePage, onNavigate, staff, onSignOut, collapsed, onToggle }) {
+function Sidebar({ activePage, onNavigate, staff, onSignOut, onProfileUpdated, collapsed, onToggle }) {
+    const [profileMenuOpen, setProfileMenuOpen] = useState(false);
+    const [profileSettingsOpen, setProfileSettingsOpen] = useState(false);
+    const [profileDraft, setProfileDraft] = useState({ name: staff.name, email: staff.email, avatar: staff.avatar || "" });
+    const [profileError, setProfileError] = useState("");
+    const [profileSaving, setProfileSaving] = useState(false);
+
+    function openProfileSettings() {
+        setProfileDraft({ name: staff.name, email: staff.email, avatar: staff.avatar || "" });
+        setProfileError("");
+        setProfileMenuOpen(false);
+        setProfileSettingsOpen(true);
+    }
+
+    async function saveProfile(event) {
+        event.preventDefault();
+        setProfileError("");
+        setProfileSaving(true);
+        try {
+            const result = await apiRequest("/auth/profile", { method: "PATCH", body: JSON.stringify(profileDraft) });
+            onProfileUpdated(result.staff);
+            setProfileSettingsOpen(false);
+        } catch (saveError) {
+            setProfileError(saveError.message);
+        } finally {
+            setProfileSaving(false);
+        }
+    }
+
+    async function chooseProfilePicture(event) {
+        const file = event.target.files?.[0];
+        if (!file) return;
+        if (!["image/png", "image/jpeg", "image/webp", "image/gif"].includes(file.type)) {
+            setProfileError("Choose a PNG, JPEG, WebP, or GIF image.");
+            return;
+        }
+        if (file.size > 1024 * 1024) {
+            setProfileError("Profile pictures must be 1 MB or smaller.");
+            return;
+        }
+        try {
+            const avatar = await readFileAsDataUrl(file);
+            setProfileDraft((draft) => ({ ...draft, avatar }));
+            setProfileError("");
+        } catch (fileError) {
+            setProfileError(fileError.message);
+        }
+    }
+
     return (
         <aside className={`sidebar${collapsed ? " sidebar-collapsed" : ""}`}>
             <div className="sidebar-brand">
@@ -97,10 +145,29 @@ function Sidebar({ activePage, onNavigate, staff, onSignOut, collapsed, onToggle
                 ))}
             </nav>
             <footer className="sidebar-account">
-                <div className="account-avatar" aria-hidden="true">{staff.name.slice(0, 1).toUpperCase()}</div>
-                {!collapsed && <div className="account-copy"><strong>{staff.name}</strong><span>{staff.email}</span></div>}
-                <button className="signout-button" type="button" onClick={onSignOut} title="Sign out" aria-label="Sign out">↗</button>
+                <button className="account-profile-trigger" type="button" onClick={() => setProfileMenuOpen((open) => !open)} aria-expanded={profileMenuOpen} aria-haspopup="menu" title="Open profile menu">
+                    <span className="account-avatar" aria-hidden="true">{staff.avatar ? <img src={staff.avatar} alt="" /> : staff.name.slice(0, 1).toUpperCase()}</span>
+                    {!collapsed && <span className="account-copy"><strong>{staff.name}</strong><span>{staff.email}</span></span>}
+                </button>
+                {profileMenuOpen && <div className="profile-menu" role="menu">
+                    <div className="profile-menu-heading"><strong>{staff.name}</strong><span>{staff.role}</span></div>
+                    <button className="profile-settings-button" type="button" role="menuitem" onClick={openProfileSettings}>Profile settings</button>
+                    <button className="profile-logout-button" type="button" role="menuitem" onClick={onSignOut}>Log out</button>
+                </div>}
             </footer>
+            {profileSettingsOpen && <div className="modal-backdrop" onMouseDown={(event) => event.target === event.currentTarget && setProfileSettingsOpen(false)}>
+                <form className="ticket-modal profile-settings-modal" role="dialog" aria-modal="true" aria-labelledby="profile-settings-title" onSubmit={saveProfile}>
+                    <div className="modal-title-row"><div><p className="page-eyebrow">YOUR ACCOUNT</p><h2 id="profile-settings-title">Profile settings</h2></div><button className="modal-close" type="button" onClick={() => setProfileSettingsOpen(false)} aria-label="Close">×</button></div>
+                    <div className="profile-picture-editor">
+                        <span className="profile-picture-preview">{profileDraft.avatar ? <img src={profileDraft.avatar} alt="Profile preview" /> : profileDraft.name.slice(0, 1).toUpperCase()}</span>
+                        <div><label className="profile-picture-upload">Choose picture<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={chooseProfilePicture} /></label><small>PNG, JPEG, WebP, or GIF. Maximum 1 MB.</small>{profileDraft.avatar && <button className="text-button" type="button" onClick={() => setProfileDraft((draft) => ({ ...draft, avatar: "" }))}>Remove picture</button>}</div>
+                    </div>
+                    <label>Full name<input required minLength="2" autoComplete="name" value={profileDraft.name} onChange={(event) => setProfileDraft((draft) => ({ ...draft, name: event.target.value }))} /></label>
+                    <label>Email<input type="email" required autoComplete="email" value={profileDraft.email} onChange={(event) => setProfileDraft((draft) => ({ ...draft, email: event.target.value }))} /></label>
+                    {profileError && <p className="form-error" role="alert">{profileError}</p>}
+                    <div className="modal-actions"><button type="button" className="secondary-button" onClick={() => setProfileSettingsOpen(false)}>Cancel</button><button type="submit" className="primary-button" disabled={profileSaving}>{profileSaving ? "Saving…" : "Save profile"}</button></div>
+                </form>
+            </div>}
         </aside>
     );
 }
@@ -124,7 +191,7 @@ function App() {
     const [entitiesLoading, setEntitiesLoading] = useState(false);
     const [entityModalOpen, setEntityModalOpen] = useState(false);
     const [editingEntity, setEditingEntity] = useState(null);
-    const [entityDraft, setEntityDraft] = useState({ name: "", email: "", department: "", assetTag: "", type: "", status: "Available", employeeId: "" });
+    const [entityDraft, setEntityDraft] = useState({ name: "", email: "", department: "", assetTag: "", type: "", status: "Available", employeeId: "", createAccount: false, password: "" });
     const [entityError, setEntityError] = useState("");
     const [openActionId, setOpenActionId] = useState(null);
     const [filterTechnician, setFilterTechnician] = useState("All");
@@ -142,6 +209,15 @@ function App() {
     const [authPassword, setAuthPassword] = useState("");
     const [authError, setAuthError] = useState("");
     const [staffMembers, setStaffMembers] = useState([]);
+    const [technicians, setTechnicians] = useState([]);
+    const [newTechnicianName, setNewTechnicianName] = useState("");
+    const [newTechnicianEmail, setNewTechnicianEmail] = useState("");
+    const [editingTechnicianId, setEditingTechnicianId] = useState(null);
+    const [technicianEmailDraft, setTechnicianEmailDraft] = useState("");
+    const [technicianAdminError, setTechnicianAdminError] = useState("");
+    const [technicianAdminMessage, setTechnicianAdminMessage] = useState("");
+    const [assigningTicketId, setAssigningTicketId] = useState(null);
+    const [assignmentDraft, setAssignmentDraft] = useState("");
     const [newStaffName, setNewStaffName] = useState("");
     const [newStaffEmail, setNewStaffEmail] = useState("");
     const [newStaffPassword, setNewStaffPassword] = useState("");
@@ -261,6 +337,18 @@ function App() {
 
     useEffect(() => {
         if (!currentStaff) {
+            setTechnicians([]);
+            return undefined;
+        }
+        let cancelled = false;
+        apiRequest("/technicians")
+            .then((items) => { if (!cancelled) setTechnicians(items); })
+            .catch((loadError) => { if (!cancelled) setTechnicianAdminError(loadError.message); });
+        return () => { cancelled = true; };
+    }, [currentStaff, authToken]);
+
+    useEffect(() => {
+        if (!currentStaff) {
             setEmployees([]);
             setDevices([]);
             return undefined;
@@ -307,7 +395,8 @@ function App() {
         count: tickets.filter((ticket) => ticket.priority === level).length,
     }));
     const maxPriorityCount = Math.max(1, ...priorityCounts.map(({ count }) => count));
-    const technicianOptions = [...new Set(tickets.map((ticket) => ticket.technician).filter(Boolean))].sort();
+    const technicianOptions = technicians.map((item) => item.name).sort((a, b) => a.localeCompare(b));
+    const ticketTechnicianOptions = [...new Set([...technicianOptions, ...tickets.map((ticket) => ticket.technician).filter(Boolean)])].sort();
     const matchingTickets = tickets.filter((ticket) => {
         const query = search.trim().toLowerCase();
         const matchesSearch = !query ||
@@ -317,7 +406,7 @@ function App() {
         const matchesStatus = statusFilter === "All" || ticket.status === statusFilter;
         const matchesPriority = priorityFilter === "All" || ticket.priority === priorityFilter;
         const matchesTechnician = filterTechnician === "All" ||
-            (filterTechnician === "Unassigned" ? !ticket.technician : ticket.technician === filterTechnician);
+            (filterTechnician === "Unassigned" ? !ticket.technician && ticket.status !== "Resolved" : ticket.technician === filterTechnician);
         return matchesSearch && matchesStatus && matchesPriority && matchesTechnician;
     });
     const pageSize = 10;
@@ -327,6 +416,65 @@ function App() {
     const overdueTickets = tickets.filter((ticket) => ticket.status !== "Resolved" && ticket.dueDate && ticket.dueDate < getLocalDate());
     const highPriorityTickets = tickets.filter((ticket) => ticket.priority === "High" && ticket.status !== "Resolved");
     const unassignedTickets = tickets.filter((ticket) => !ticket.technician && ticket.status !== "Resolved");
+    const reportNow = new Date();
+    const reportMonthStart = new Date(reportNow.getFullYear(), reportNow.getMonth() - 11, 1);
+    const reportTicketDates = tickets.map((ticket) => {
+        const history = ticket.activity || [];
+        const createdEvent = history.find((item) => item.action === "created");
+        const createdAt = createdEvent?.at ? new Date(createdEvent.at) : null;
+        const statusEvents = history.filter((item) => item.action === "status" && item.at)
+            .sort((a, b) => new Date(a.at) - new Date(b.at));
+        const lastStatusEvent = statusEvents[statusEvents.length - 1];
+        const resolvedAt = ticket.status === "Resolved" && /\bto Resolved\b/.test(lastStatusEvent?.text || "")
+            ? new Date(lastStatusEvent.at)
+            : null;
+        const resolutionMs = createdAt && resolvedAt && resolvedAt >= createdAt ? resolvedAt - createdAt : null;
+        return { ticket, createdAt, resolvedAt, resolutionMs };
+    });
+    const reportResolvedByMonth = Array.from({ length: 12 }, (_, index) => {
+        const date = new Date(reportMonthStart.getFullYear(), reportMonthStart.getMonth() + index, 1);
+        return { key: `${date.getFullYear()}-${date.getMonth()}`, label: date.toLocaleDateString(undefined, { month: "short" }), count: 0 };
+    });
+    const reportMonthLookup = new Map(reportResolvedByMonth.map((item, index) => [item.key, index]));
+    for (const item of reportTicketDates) {
+        if (!item.resolvedAt || item.resolvedAt < reportMonthStart) continue;
+        const monthIndex = reportMonthLookup.get(`${item.resolvedAt.getFullYear()}-${item.resolvedAt.getMonth()}`);
+        if (monthIndex !== undefined) reportResolvedByMonth[monthIndex].count += 1;
+    }
+    const reportResolvedThisMonth = reportResolvedByMonth[reportResolvedByMonth.length - 1].count;
+    const reportMaxResolvedMonth = Math.max(1, ...reportResolvedByMonth.map((item) => item.count));
+    const reportPriorityCounts = PRIORITIES.map((level) => ({ label: level, count: tickets.filter((ticket) => ticket.priority === level).length }));
+    const reportMaxPriority = Math.max(1, ...reportPriorityCounts.map((item) => item.count));
+    const resolvedWithTimes = reportTicketDates.filter((item) => item.resolutionMs !== null);
+    const averageResolutionMs = resolvedWithTimes.length
+        ? resolvedWithTimes.reduce((sum, item) => sum + item.resolutionMs, 0) / resolvedWithTimes.length
+        : null;
+    const formatResolutionTime = (milliseconds) => {
+        if (milliseconds === null || !Number.isFinite(milliseconds)) return "—";
+        const hours = milliseconds / (60 * 60 * 1000);
+        return hours < 24 ? `${hours.toFixed(1)} hours` : `${(hours / 24).toFixed(1)} days`;
+    };
+    const reportTechnicianPerformance = [...new Set([...technicianOptions, ...tickets.map((ticket) => ticket.technician).filter(Boolean)])]
+        .map((name) => {
+            const completed = reportTicketDates.filter((item) => item.ticket.technician === name && item.ticket.status === "Resolved");
+            const timed = completed.filter((item) => item.resolutionMs !== null);
+            return {
+                name,
+                resolved: completed.length,
+                open: tickets.filter((ticket) => ticket.technician === name && ticket.status !== "Resolved").length,
+                averageMs: timed.length ? timed.reduce((sum, item) => sum + item.resolutionMs, 0) / timed.length : null,
+            };
+        })
+        .sort((a, b) => b.resolved - a.resolved || a.name.localeCompare(b.name));
+    reportTechnicianPerformance.push({
+        name: "Unassigned",
+        resolved: tickets.filter((ticket) => !ticket.technician && ticket.status === "Resolved").length,
+        open: unassignedTickets.length,
+        averageMs: null,
+    });
+    const reportMaxTechnicianResolved = Math.max(1, ...reportTechnicianPerformance.map((item) => item.resolved));
+    const storedAttachments = tickets.flatMap((ticket) => (ticket.attachments || []).map((file) => ({ ...file, ticketId: ticket.id, employee: ticket.employee })))
+        .sort((a, b) => new Date(b.at || 0).getTime() - new Date(a.at || 0).getTime());
     const detailsTicket = tickets.find((ticket) => ticket.id === detailsTicketId);
 
     function navigateTo(page) {
@@ -340,6 +488,29 @@ function App() {
         setPriorityFilter("All");
         setFilterTechnician("All");
         setCurrentPage(1);
+    }
+
+    function downloadTicketReport() {
+        const headers = ["Ticket ID", "Employee", "Issue", "Status", "Priority", "Assigned technician", "Due date", "Comments", "Attachments"];
+        const escapeCsv = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
+        const rows = tickets.map((ticket) => [
+            ticket.id,
+            ticket.employee,
+            ticket.issue,
+            ticket.status,
+            ticket.priority,
+            ticket.technician || "Unassigned",
+            ticket.dueDate || "",
+            (ticket.comments || []).length,
+            (ticket.attachments || []).map((file) => file.name).join("; "),
+        ]);
+        const csv = [headers, ...rows].map((row) => row.map(escapeCsv).join(",")).join("\r\n");
+        const url = URL.createObjectURL(new Blob([`\uFEFF${csv}`], { type: "text/csv;charset=utf-8" }));
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "it-support-ticket-report.csv";
+        link.click();
+        URL.revokeObjectURL(url);
     }
 
     function askToConfirm({ title, message, confirmLabel, action, danger = true }) {
@@ -405,6 +576,53 @@ function App() {
         }
     }
 
+    async function addTechnician(event) {
+        event.preventDefault();
+        setTechnicianAdminError("");
+        setTechnicianAdminMessage("");
+        try {
+            const saved = await apiRequest("/technicians", {
+                method: "POST",
+                body: JSON.stringify({ name: newTechnicianName, email: newTechnicianEmail }),
+            });
+            setTechnicians((current) => [...current, saved].sort((a, b) => a.name.localeCompare(b.name)));
+            setNewTechnicianName("");
+            setNewTechnicianEmail("");
+            setTechnicianAdminMessage(`${saved.name} was added to the technician list.`);
+        } catch (saveError) {
+            setTechnicianAdminError(saveError.message);
+        }
+    }
+
+    async function removeTechnician(technicianRecord) {
+        setTechnicianAdminError("");
+        setTechnicianAdminMessage("");
+        try {
+            await apiRequest(`/technicians/${technicianRecord.id}`, { method: "DELETE" });
+            setTechnicians((current) => current.filter((item) => item.id !== technicianRecord.id));
+            setTechnicianAdminMessage(`${technicianRecord.name} was removed from the technician list.`);
+        } catch (removeError) {
+            setTechnicianAdminError(removeError.message);
+        }
+    }
+
+    async function saveTechnicianEmail(technicianRecord) {
+        setTechnicianAdminError("");
+        setTechnicianAdminMessage("");
+        try {
+            const updated = await apiRequest(`/technicians/${technicianRecord.id}`, {
+                method: "PATCH",
+                body: JSON.stringify({ email: technicianEmailDraft }),
+            });
+            setTechnicians((current) => current.map((item) => item.id === updated.id ? updated : item));
+            setEditingTechnicianId(null);
+            setTechnicianEmailDraft("");
+            setTechnicianAdminMessage(`${updated.name}'s email was saved.`);
+        } catch (saveError) {
+            setTechnicianAdminError(saveError.message);
+        }
+    }
+
     async function changeStaffStatus(member) {
         setStaffAdminError("");
         setStaffAdminMessage("");
@@ -458,7 +676,7 @@ function App() {
         setEditingEntity(record);
         setEntityError("");
         if (activePage === "employees") {
-            setEntityDraft({ name: record?.name || "", email: record?.email || "", department: record?.department || "", assetTag: "", type: "", status: "Available", employeeId: "" });
+            setEntityDraft({ name: record?.name || "", email: record?.email || "", department: record?.department || "", assetTag: "", type: "", status: "Available", employeeId: "", createAccount: false, password: "" });
         } else {
             setEntityDraft({ name: record?.name || "", email: "", department: "", assetTag: record?.assetTag || "", type: record?.type || "", status: record?.status || "Available", employeeId: record?.employeeId ? String(record.employeeId) : "" });
         }
@@ -471,7 +689,7 @@ function App() {
         const isEmployee = activePage === "employees";
         const resource = isEmployee ? "employees" : "devices";
         const body = isEmployee
-            ? { name: entityDraft.name, email: entityDraft.email, department: entityDraft.department }
+            ? { name: entityDraft.name, email: entityDraft.email, department: entityDraft.department, ...(!editingEntity && entityDraft.createAccount ? { password: entityDraft.password } : {}) }
             : { assetTag: entityDraft.assetTag, name: entityDraft.name, type: entityDraft.type, status: entityDraft.status, employeeId: entityDraft.employeeId ? Number(entityDraft.employeeId) : null };
         try {
             const saved = await apiRequest(`/${resource}${editingEntity ? `/${editingEntity.id}` : ""}`, {
@@ -578,6 +796,22 @@ function App() {
         }
     }
 
+    async function assignTicket(id, assignedTechnician) {
+        if (!assignedTechnician) return;
+        try {
+            const updated = await apiRequest(`/tickets/${id}`, {
+                method: "PUT",
+                body: JSON.stringify({ technician: assignedTechnician }),
+            });
+            setTickets((current) => current.map((ticket) => ticket.id === updated.id ? updated : ticket));
+            setError("");
+            setAssigningTicketId(null);
+            setAssignmentDraft("");
+        } catch (assignError) {
+            setError(`Could not assign ticket: ${assignError.message}`);
+        }
+    }
+
     async function addComment(event, ticketId) {
         event.preventDefault();
         const text = commentDraft.trim();
@@ -673,6 +907,7 @@ function App() {
                 onNavigate={navigateTo}
                 staff={currentStaff}
                 onSignOut={signOut}
+                onProfileUpdated={setCurrentStaff}
                 collapsed={sidebarCollapsed}
                 onToggle={() => setSidebarCollapsed((collapsed) => !collapsed)}
             />
@@ -705,6 +940,7 @@ function App() {
                         <TicketCard title="Resolution Rate" number={`${resolutionRate}%`} tone="green" compact />
                         <TicketCard title="Overdue" number={overdueCount} tone="red" compact />
                         <TicketCard title="High Priority" number={tickets.filter((ticket) => ticket.priority === "High").length} tone="purple" compact />
+                        <TicketCard title="Unassigned" number={unassignedTickets.length} tone="amber" compact />
                     </section>
 
                 <section className="analytics-section" aria-label="Ticket status analytics">
@@ -813,16 +1049,84 @@ function App() {
                     </section>
                 )}
 
+                {activePage === "settings" && currentStaff.role === "admin" && <section className="staff-admin-panel technician-admin-panel" aria-labelledby="technician-admin-title">
+                    <div className="staff-admin-heading">
+                        <div><h2 id="technician-admin-title">Technician list</h2><p>Manage the names available when assigning tickets.</p></div>
+                        <span>{technicians.length} technicians</span>
+                    </div>
+                    {technicianAdminError && <p className="form-error" role="alert">{technicianAdminError}</p>}
+                    {technicianAdminMessage && <p className="staff-admin-message" role="status">{technicianAdminMessage}</p>}
+                    <form className="technician-add-form" onSubmit={addTechnician}>
+                        <label htmlFor="new-technician-name">Technician name</label>
+                        <input id="new-technician-name" required minLength="2" value={newTechnicianName} onChange={(event) => setNewTechnicianName(event.target.value)} placeholder="e.g. Alex Tan" />
+                        <label htmlFor="new-technician-email">Email</label>
+                        <input id="new-technician-email" type="email" required value={newTechnicianEmail} onChange={(event) => setNewTechnicianEmail(event.target.value)} placeholder="alex@example.com" />
+                        <button className="primary-button" type="submit">Add technician</button>
+                    </form>
+                    <div className="table-wrapper"><table className="data-table staff-table">
+                        <thead><tr><th>Name</th><th>Email</th><th>Actions</th></tr></thead>
+                        <tbody>{technicians.length ? technicians.map((item) => <tr key={item.id}>
+                            <td><strong>{item.name}</strong></td>
+                            <td>{editingTechnicianId === item.id ? <form className="technician-email-form" onSubmit={(event) => { event.preventDefault(); saveTechnicianEmail(item); }}><input type="email" required aria-label={`Email for ${item.name}`} value={technicianEmailDraft} onChange={(event) => setTechnicianEmailDraft(event.target.value)} /><button className="text-button" type="submit">Save</button><button className="text-button" type="button" onClick={() => setEditingTechnicianId(null)}>Cancel</button></form> : item.email || "—"}</td>
+                            <td><div className="entity-row-actions">{editingTechnicianId !== item.id && <button className="text-button" type="button" onClick={() => { setEditingTechnicianId(item.id); setTechnicianEmailDraft(item.email || ""); }}>Edit email</button>}<button className="text-button entity-delete" type="button" onClick={() => askToConfirm({ title: "Remove technician?", message: `Remove ${item.name} from the technician list? Existing ticket assignments will stay unchanged.`, confirmLabel: "Remove technician", action: () => removeTechnician(item) })}>Remove</button></div></td>
+                        </tr>) : <tr><td className="empty-state" colSpan="3">No technicians listed yet.</td></tr>}</tbody>
+                    </table></div>
+                </section>}
+
                 {activePage === "settings" && currentStaff.role !== "admin" && <section className="surface-card empty-page"><h2>Administrator access required</h2><p>Only administrators can manage staff accounts.</p></section>}
 
-                {activePage === "reports" && <section className="surface-card empty-page"><h2>Ticket reports</h2><p>Use the live analytics on the Dashboard to review ticket status, priority, and resolution rate.</p><button className="secondary-button" type="button" onClick={() => navigateTo("dashboard")}>Go to Dashboard</button></section>}
+                {activePage === "reports" && <div className="reports-page">
+                    <div className="reports-heading">
+                        <div><h2>Ticket reports</h2><p>Graphs and files from tickets stored in the backend.</p></div>
+                        <button className="primary-button" type="button" onClick={downloadTicketReport} disabled={!tickets.length}>Download ticket CSV</button>
+                    </div>
+                    <section className="report-summary-grid" aria-label="Ticket report totals">
+                        <article><span>Resolved this month</span><strong>{reportResolvedThisMonth}</strong></article>
+                        <article><span>Average resolution</span><strong>{formatResolutionTime(averageResolutionMs)}</strong><small>{resolvedWithTimes.length} dated tickets</small></article>
+                        <article><span>Technicians</span><strong>{technicians.length}</strong></article>
+                        <article><span>Stored files</span><strong>{storedAttachments.length}</strong></article>
+                    </section>
+                    <section className="report-chart-grid" aria-label="Ticket graphs">
+                        <article className="report-chart-card">
+                            <div className="section-heading"><div><h2>Tickets resolved per month</h2><p>Last 12 months, based on recorded ticket status history</p></div></div>
+                            <div className="report-trend-scroll"><div className="report-trend-chart" role="img" aria-label="Tickets resolved per month for the last 12 months">
+                                {reportResolvedByMonth.map((bucket) => <div className="report-trend-column" key={bucket.key} title={`${bucket.label}: ${bucket.count} resolved ticket${bucket.count === 1 ? "" : "s"}`}>
+                                    <strong>{bucket.count || ""}</strong><div className="report-trend-bar" style={{ height: `${bucket.count ? Math.max(6, (bucket.count / reportMaxResolvedMonth) * 100) : 0}%` }} /><span>{bucket.label}</span>
+                                </div>)}
+                            </div></div>
+                        </article>
+                        <article className="report-chart-card">
+                            <div className="section-heading"><div><h2>Tickets by priority</h2><p>All tickets in backend storage</p></div></div>
+                            <div className="report-bar-list">{reportPriorityCounts.map((item) => <div className="report-bar-row" key={item.label}><span>{item.label}</span><div className="chart-track"><div className={`report-bar report-bar-priority-${item.label.toLowerCase()}`} style={{ width: `${(item.count / reportMaxPriority) * 100}%` }} /></div><strong>{item.count}</strong></div>)}</div>
+                        </article>
+                        <article className="report-chart-card report-chart-wide">
+                            <div className="section-heading"><div><h2>Technician performance</h2><p>Resolved tickets, average resolution time, and open workload</p></div></div>
+                            {reportTechnicianPerformance.some((item) => item.resolved || item.open) ? <div className="report-performance-scroll"><div className="report-performance-table"><div className="report-performance-header"><span>Technician</span><span>Resolved</span><span>Average time</span><span>Open</span></div>
+                                {reportTechnicianPerformance.map((item) => <div className="report-performance-row" key={item.name}>
+                                    <strong>{item.name}</strong><div className="report-performance-resolved"><div className="chart-track"><div className="report-bar report-bar-technician" style={{ width: `${(item.resolved / reportMaxTechnicianResolved) * 100}%` }} /></div><span>{item.resolved}</span></div><span>{formatResolutionTime(item.averageMs)}</span><span>{item.open}</span>
+                                </div>)}
+                            </div></div> : <p className="muted-message">No technician tickets to report yet.</p>}
+                        </article>
+                    </section>
+                    <section className="staff-admin-panel report-files-panel" aria-labelledby="report-files-title">
+                        <div className="staff-admin-heading"><div><h2 id="report-files-title">Ticket files</h2><p>Files attached to tickets in backend storage.</p></div><span>{storedAttachments.length} files</span></div>
+                        <div className="table-wrapper"><table className="data-table report-files-table">
+                            <thead><tr><th>File</th><th>Ticket</th><th>Employee</th><th>Added by</th><th>Uploaded</th><th>Download</th></tr></thead>
+                            <tbody>{storedAttachments.length ? storedAttachments.map((file) => <tr key={`${file.ticketId}-${file.id}`}>
+                                <td><strong>{file.name}</strong><small>{(file.size / 1024).toFixed(0)} KB</small></td>
+                                <td>#{file.ticketId}</td><td>{file.employee}</td><td>{file.by || "—"}</td><td>{file.at ? new Date(file.at).toLocaleString() : "—"}</td>
+                                <td><a className="report-download-link" href={file.dataUrl} download={file.name}>Download</a></td>
+                            </tr>) : <tr><td className="empty-state" colSpan="6">No files have been attached to tickets.</td></tr>}</tbody>
+                        </table></div>
+                    </section>
+                </div>}
                 {activePage === "employees" && <section className="staff-admin-panel entity-panel">
                     <div className="staff-admin-heading"><div><h2>Employee directory</h2><p>People who use the IT support system and company devices.</p></div><span>{employees.length} employees</span></div>
                     <div className="table-wrapper"><table className="data-table entity-table">
                         <thead><tr><th>Name</th><th>Email</th><th>Department</th><th>Devices</th><th>Actions</th></tr></thead>
                         <tbody>{entitiesLoading ? <tr><td className="empty-state" colSpan="5">Loading employees...</td></tr> : employees.length === 0 ? <tr><td className="empty-state" colSpan="5">No employees yet. Add an employee to get started.</td></tr> : employees.map((person) => (
                             <tr key={person.id}>
-                                <td><strong>{person.name}</strong></td><td>{person.email || "—"}</td><td>{person.department || "—"}</td>
+                                <td><strong>{person.name}</strong>{person.hasAccount && <span className="employee-account-badge">Account</span>}</td><td>{person.email || "—"}</td><td>{person.department || "—"}</td>
                                 <td>{devices.filter((device) => device.employeeId === person.id).length}</td>
                                 <td><div className="entity-row-actions"><button className="secondary-button" type="button" onClick={() => openEntityForm(person)}>Edit</button><button className="text-button entity-delete" type="button" onClick={() => askToConfirm({ title: "Delete employee?", message: `Delete ${person.name}? Their device records will remain and become unassigned.`, confirmLabel: "Delete employee", action: () => deleteEntity("employees", person) })}>Delete</button></div></td>
                             </tr>
@@ -878,7 +1182,7 @@ function App() {
                             <select value={filterTechnician} onChange={(event) => { setFilterTechnician(event.target.value); setCurrentPage(1); }}>
                                 <option value="All">All technicians</option>
                                 <option value="Unassigned">Unassigned</option>
-                                {technicianOptions.map((name) => <option key={name} value={name}>{name}</option>)}
+                                {ticketTechnicianOptions.map((name) => <option key={name} value={name}>{name}</option>)}
                             </select>
                         </label>
                         <button className="text-button clear-filters-button" type="button" onClick={clearFilters}>Clear filters</button>
@@ -887,7 +1191,7 @@ function App() {
                     <div className="table-wrapper">
                         <table className="data-table">
                             <thead>
-                                <tr><th>Ticket ID</th><th>Employee</th><th>Issue</th><th>Priority</th><th>Technician</th><th>Due Date</th><th>Status</th><th>Actions</th></tr>
+                                <tr><th>Ticket ID</th><th>Employee</th><th>Issue</th><th>Priority</th><th>Assigned technician</th><th>Due Date</th><th>Status</th><th>Actions</th></tr>
                             </thead>
                             <tbody>
                                 {pageTickets.length === 0 ? (
@@ -904,7 +1208,7 @@ function App() {
                                         <td>{ticket.employee}</td>
                                         <td>{ticket.issue}</td>
                                         <td><span className={`priority-badge priority-${ticket.priority.toLowerCase()}`}>{ticket.priority}</span></td>
-                                        <td>{ticket.technician || "Unassigned"}</td>
+                                        <td>{ticket.technician || <span className="unassigned-cell">Unassigned<button className="assign-inline-button" type="button" disabled={!technicians.length} title={technicians.length ? "Assign this ticket" : "Add technicians in Settings first"} onClick={() => { setDetailsTicketId(ticket.id); setAssignmentDraft(technicians[0]?.name || ""); setAssigningTicketId(ticket.id); }}>Assign</button></span>}</td>
                                         <td>
                                             {ticket.dueDate || "—"}
                                             {ticket.status !== "Resolved" && ticket.dueDate && ticket.dueDate < getLocalDate() && <span className="overdue-badge">Overdue</span>}
@@ -945,8 +1249,10 @@ function App() {
                             <div className="modal-title-row"><div><p className="page-eyebrow">{activePage === "employees" ? "EMPLOYEE DIRECTORY" : "DEVICE INVENTORY"}</p><h2 id="entity-form-title">{editingEntity ? "Edit" : "Add"} {activePage === "employees" ? "employee" : "device"}</h2></div><button className="modal-close" type="button" onClick={() => setEntityModalOpen(false)} aria-label="Close">×</button></div>
                             {activePage === "employees" ? <>
                                 <label>Full name<input required minLength="2" autoComplete="name" value={entityDraft.name} onChange={(event) => setEntityDraft((draft) => ({ ...draft, name: event.target.value }))} /></label>
-                                <label>Email<input type="email" autoComplete="email" value={entityDraft.email} onChange={(event) => setEntityDraft((draft) => ({ ...draft, email: event.target.value }))} /></label>
+                                <label>Email<input type="email" autoComplete="email" required={entityDraft.createAccount || Boolean(editingEntity?.hasAccount)} value={entityDraft.email} onChange={(event) => setEntityDraft((draft) => ({ ...draft, email: event.target.value }))} /></label>
                                 <label>Department<input value={entityDraft.department} onChange={(event) => setEntityDraft((draft) => ({ ...draft, department: event.target.value }))} placeholder="e.g. Finance" /></label>
+                                {!editingEntity && <label className="account-create-toggle"><input type="checkbox" checked={entityDraft.createAccount} onChange={(event) => setEntityDraft((draft) => ({ ...draft, createAccount: event.target.checked }))} /> Create an employee sign-in account</label>}
+                                {!editingEntity && entityDraft.createAccount && <label>Initial password<input type="password" required minLength="8" autoComplete="new-password" value={entityDraft.password} onChange={(event) => setEntityDraft((draft) => ({ ...draft, password: event.target.value }))} /><small>At least 8 characters. The employee will sign in with the email above.</small></label>}
                             </> : <>
                                 <label>Asset tag<input required minLength="2" value={entityDraft.assetTag} onChange={(event) => setEntityDraft((draft) => ({ ...draft, assetTag: event.target.value }))} placeholder="e.g. LAP-001" /></label>
                                 <label>Device name<input required minLength="2" value={entityDraft.name} onChange={(event) => setEntityDraft((draft) => ({ ...draft, name: event.target.value }))} placeholder="e.g. ThinkPad X1" /></label>
@@ -970,7 +1276,7 @@ function App() {
                             <label>Issue description<textarea required rows="4" value={issue} onChange={(event) => setIssue(event.target.value)} placeholder="Describe the issue" /></label>
                             <div className="modal-form-row">
                                 <label>Priority<select value={priority} onChange={(event) => setPriority(event.target.value)}>{PRIORITIES.map((level) => <option key={level} value={level}>{level}</option>)}</select></label>
-                                <label>Assigned technician<input value={technician} onChange={(event) => setTechnician(event.target.value)} placeholder="Unassigned" /></label>
+                                <label>Assigned technician<select value={technician} onChange={(event) => setTechnician(event.target.value)}><option value="">Unassigned</option>{technicianOptions.map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
                             </div>
                             <label>Due date<input type="date" value={dueDate} onChange={(event) => setDueDate(event.target.value)} /></label>
                             {error && <p className="form-error" role="alert">{error}</p>}
@@ -1022,7 +1328,7 @@ function App() {
                             <label>Employee name<input required value={editingTicket.employee} onChange={(event) => setEditingTicket({ ...editingTicket, employee: event.target.value })} /></label>
                             <label>Issue description<textarea required rows="3" value={editingTicket.issue} onChange={(event) => setEditingTicket({ ...editingTicket, issue: event.target.value })} /></label>
                             <label>Priority<select value={editingTicket.priority} onChange={(event) => setEditingTicket({ ...editingTicket, priority: event.target.value })}>{PRIORITIES.map((level) => <option key={level} value={level}>{level}</option>)}</select></label>
-                            <label>Assigned technician<input value={editingTicket.technician} onChange={(event) => setEditingTicket({ ...editingTicket, technician: event.target.value })} placeholder="Unassigned" /></label>
+                            <label>Assigned technician<select value={editingTicket.technician} onChange={(event) => setEditingTicket({ ...editingTicket, technician: event.target.value })}><option value="">Unassigned</option>{[...new Set([...technicianOptions, editingTicket.technician].filter(Boolean))].sort().map((name) => <option key={name} value={name}>{name}</option>)}</select></label>
                             <label>Due date<input type="date" value={editingTicket.dueDate} onChange={(event) => setEditingTicket({ ...editingTicket, dueDate: event.target.value })} /></label>
                             <div className="modal-actions">
                                 <button type="button" className="cancel-button" onClick={() => setEditingTicket(null)}>Cancel</button>
@@ -1041,7 +1347,7 @@ function App() {
                                 <dt>Issue</dt><dd>{detailsTicket.issue}</dd>
                                 <dt>Status</dt><dd>{detailsTicket.status}</dd>
                                 <dt>Priority</dt><dd>{detailsTicket.priority}</dd>
-                                <dt>Assigned technician</dt><dd>{detailsTicket.technician || "Unassigned"}</dd>
+                                <dt>Assigned technician</dt><dd className="ticket-assignee-detail">{detailsTicket.technician || "Unassigned"}{!detailsTicket.technician && (assigningTicketId === detailsTicket.id ? <><select aria-label="Select technician" value={assignmentDraft} onChange={(event) => setAssignmentDraft(event.target.value)}><option value="">Choose a technician</option>{technicians.map((item) => <option key={item.id} value={item.name}>{item.name}</option>)}</select><button className="text-button assign-ticket-button" type="button" disabled={!assignmentDraft} onClick={() => assignTicket(detailsTicket.id, assignmentDraft)}>Assign</button><button className="text-button assign-ticket-button" type="button" onClick={() => setAssigningTicketId(null)}>Cancel</button></> : <button className="text-button assign-ticket-button" type="button" disabled={!technicians.length} onClick={() => { setAssignmentDraft(technicians[0]?.name || ""); setAssigningTicketId(detailsTicket.id); }}>{technicians.length ? "Assign" : "No technicians listed"}</button>)}</dd>
                                 <dt>Due date</dt><dd>{detailsTicket.dueDate || "Not set"}</dd>
                                 <dt>SLA</dt><dd>{detailsTicket.status !== "Resolved" && detailsTicket.dueDate && detailsTicket.dueDate < getLocalDate() ? <span className="overdue-badge">Overdue</span> : "On track"}</dd>
                             </dl>

@@ -47,6 +47,7 @@ database.exec(`
         password_hash TEXT NOT NULL,
         role TEXT NOT NULL CHECK (role IN ('admin', 'staff')),
         active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1)),
+        avatar_data_url TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL
     );
     CREATE TABLE IF NOT EXISTS sessions (
@@ -61,6 +62,12 @@ database.exec(`
         department TEXT NOT NULL DEFAULT '',
         created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS technicians (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        name TEXT NOT NULL UNIQUE COLLATE NOCASE,
+        email TEXT NOT NULL DEFAULT '',
+        created_at TEXT NOT NULL
     );
     CREATE UNIQUE INDEX IF NOT EXISTS employees_email_unique_idx ON employees(email COLLATE NOCASE) WHERE email <> '';
     CREATE TABLE IF NOT EXISTS devices (
@@ -81,6 +88,17 @@ database.exec(`
 if (!database.pragma("table_info(staff)").some((column) => column.name === "active")) {
     database.exec("ALTER TABLE staff ADD COLUMN active INTEGER NOT NULL DEFAULT 1 CHECK (active IN (0, 1))");
 }
+if (!database.pragma("table_info(staff)").some((column) => column.name === "employee_id")) {
+    database.exec("ALTER TABLE staff ADD COLUMN employee_id INTEGER REFERENCES employees(id) ON DELETE CASCADE");
+}
+if (!database.pragma("table_info(staff)").some((column) => column.name === "avatar_data_url")) {
+    database.exec("ALTER TABLE staff ADD COLUMN avatar_data_url TEXT NOT NULL DEFAULT ''");
+}
+database.exec("CREATE UNIQUE INDEX IF NOT EXISTS staff_employee_id_unique_idx ON staff(employee_id) WHERE employee_id IS NOT NULL");
+if (!database.pragma("table_info(technicians)").some((column) => column.name === "email")) {
+    database.exec("ALTER TABLE technicians ADD COLUMN email TEXT NOT NULL DEFAULT ''");
+}
+database.exec("CREATE UNIQUE INDEX IF NOT EXISTS technicians_email_unique_idx ON technicians(email COLLATE NOCASE) WHERE email <> ''");
 
 const selectTickets = database.prepare("SELECT * FROM tickets ORDER BY id DESC");
 const selectTicketById = database.prepare("SELECT * FROM tickets WHERE id = ?");
@@ -164,8 +182,16 @@ async function verifyPassword(password, savedHash) {
     return expected.length === actual.length && timingSafeEqual(expected, actual);
 }
 
-function publicStaff(staff) {
-    return { id: staff.id, name: staff.name, email: staff.email, role: staff.role, active: Boolean(staff.active) };
+function publicStaff(staff, includeAvatar = false) {
+    return {
+        id: staff.id,
+        name: staff.name,
+        email: staff.email,
+        role: staff.employee_id ? "employee" : staff.role,
+        employeeId: staff.employee_id || null,
+        active: Boolean(staff.active),
+        ...(includeAvatar ? { avatar: staff.avatar_data_url || "" } : {}),
+    };
 }
 
 function publicEmployee(row) {
@@ -174,6 +200,7 @@ function publicEmployee(row) {
         name: row.name,
         email: row.email,
         department: row.department,
+        hasAccount: Boolean(row.has_account),
         createdAt: row.created_at,
         updatedAt: row.updated_at,
     } : null;
@@ -193,8 +220,8 @@ function publicDevice(row) {
     } : null;
 }
 
-const selectEmployees = database.prepare("SELECT * FROM employees ORDER BY name COLLATE NOCASE, id");
-const selectEmployeeById = database.prepare("SELECT * FROM employees WHERE id = ?");
+const selectEmployees = database.prepare("SELECT employees.*, EXISTS(SELECT 1 FROM staff WHERE staff.employee_id = employees.id) AS has_account FROM employees ORDER BY name COLLATE NOCASE, id");
+const selectEmployeeById = database.prepare("SELECT employees.*, EXISTS(SELECT 1 FROM staff WHERE staff.employee_id = employees.id) AS has_account FROM employees WHERE employees.id = ?");
 const selectDevices = database.prepare(`
     SELECT devices.*, employees.name AS employee_name
     FROM devices LEFT JOIN employees ON employees.id = devices.employee_id
@@ -211,7 +238,7 @@ function issueSession(staff) {
     const tokenHash = createHash("sha256").update(token).digest("hex");
     const expiresAt = new Date(Date.now() + SESSION_DAYS * 24 * 60 * 60 * 1000).toISOString();
     database.prepare("INSERT INTO sessions (token_hash, staff_id, expires_at) VALUES (?, ?, ?)").run(tokenHash, staff.id, expiresAt);
-    return { token, staff: publicStaff(staff), expiresAt };
+    return { token, staff: publicStaff(staff, true), expiresAt };
 }
 
 function requireAuth(request, response, next) {
@@ -220,12 +247,12 @@ function requireAuth(request, response, next) {
     if (!token) return response.status(401).json({ error: "Sign in to continue." });
     const tokenHash = createHash("sha256").update(token).digest("hex");
     const row = database.prepare(`
-        SELECT staff.id, staff.name, staff.email, staff.role, staff.active, sessions.token_hash
+        SELECT staff.id, staff.name, staff.email, staff.role, staff.active, staff.employee_id, staff.avatar_data_url, sessions.token_hash
         FROM sessions JOIN staff ON staff.id = sessions.staff_id
         WHERE sessions.token_hash = ? AND sessions.expires_at > ? AND staff.active = 1
     `).get(tokenHash, new Date().toISOString());
     if (!row) return response.status(401).json({ error: "Your session expired. Please sign in again." });
-    request.staff = publicStaff(row);
+    request.staff = publicStaff(row, true);
     request.sessionTokenHash = row.token_hash;
     return next();
 }
@@ -283,14 +310,41 @@ app.get("/api/auth/me", requireAuth, (request, response) => {
     response.json({ staff: request.staff });
 });
 
+app.patch("/api/auth/profile", requireAuth, (request, response) => {
+    const name = typeof request.body.name === "string" ? request.body.name.trim() : "";
+    const email = typeof request.body.email === "string" ? request.body.email.trim().toLowerCase() : "";
+    const avatar = typeof request.body.avatar === "string" ? request.body.avatar : "";
+    if (name.length < 2) return response.status(400).json({ error: "Name must have at least 2 characters." });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid email address." });
+    if (avatar && (avatar.length > 1_400_000 || !/^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/]+=*$/.test(avatar))) {
+        return response.status(400).json({ error: "Profile pictures must be PNG, JPEG, WebP, or GIF images no larger than 1 MB." });
+    }
+    try {
+        const updateProfile = database.transaction(() => {
+            database.prepare("UPDATE staff SET name = ?, email = ?, avatar_data_url = ? WHERE id = ?")
+                .run(name, email, avatar, request.staff.id);
+            if (request.staff.employeeId) {
+                database.prepare("UPDATE employees SET name = ?, email = ?, updated_at = ? WHERE id = ?")
+                    .run(name, email, new Date().toISOString(), request.staff.employeeId);
+            }
+        });
+        updateProfile();
+        const staff = database.prepare("SELECT id, name, email, role, active, employee_id, avatar_data_url FROM staff WHERE id = ?").get(request.staff.id);
+        return response.json({ staff: publicStaff(staff, true) });
+    } catch (error) {
+        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") return response.status(409).json({ error: "That email address is already in use." });
+        throw error;
+    }
+});
+
 app.post("/api/auth/logout", requireAuth, (request, response) => {
     database.prepare("DELETE FROM sessions WHERE token_hash = ?").run(request.sessionTokenHash);
     return response.status(204).end();
 });
 
 app.get("/api/auth/staff", requireAuth, requireAdmin, (_request, response) => {
-    const staff = database.prepare("SELECT id, name, email, role, active, created_at AS createdAt FROM staff ORDER BY id").all()
-        .map((member) => ({ ...member, active: Boolean(member.active) }));
+    const staff = database.prepare("SELECT id, name, email, role, employee_id, active, created_at AS createdAt FROM staff ORDER BY id").all()
+        .map((member) => ({ ...publicStaff(member), createdAt: member.createdAt }));
     response.json(staff);
 });
 
@@ -342,6 +396,45 @@ app.delete("/api/auth/staff/:id/sessions", requireAuth, requireAdmin, (request, 
     if (!database.prepare("SELECT id FROM staff WHERE id = ?").get(id)) return response.status(404).json({ error: "Staff account not found." });
     const result = database.prepare("DELETE FROM sessions WHERE staff_id = ?").run(id);
     return response.json({ revokedSessions: result.changes });
+});
+
+app.get("/api/technicians", requireAuth, (_request, response) => {
+    response.json(database.prepare("SELECT id, name, email, created_at AS createdAt FROM technicians ORDER BY name COLLATE NOCASE, id").all());
+});
+
+app.post("/api/technicians", requireAuth, requireAdmin, (request, response) => {
+    const name = typeof request.body.name === "string" ? request.body.name.trim() : "";
+    const email = typeof request.body.email === "string" ? request.body.email.trim().toLowerCase() : "";
+    if (name.length < 2) return response.status(400).json({ error: "Technician name must have at least 2 characters." });
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid technician email address." });
+    try {
+        const result = database.prepare("INSERT INTO technicians (name, email, created_at) VALUES (?, ?, ?)").run(name, email, new Date().toISOString());
+        const technician = database.prepare("SELECT id, name, email, created_at AS createdAt FROM technicians WHERE id = ?").get(result.lastInsertRowid);
+        return response.status(201).json(technician);
+    } catch (error) {
+        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") return response.status(409).json({ error: "That technician name or email is already on the list." });
+        throw error;
+    }
+});
+
+app.patch("/api/technicians/:id", requireAuth, requireAdmin, (request, response) => {
+    const id = Number(request.params.id);
+    const email = typeof request.body.email === "string" ? request.body.email.trim().toLowerCase() : "";
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid technician email address." });
+    try {
+        const result = database.prepare("UPDATE technicians SET email = ? WHERE id = ?").run(email, id);
+        if (!result.changes) return response.status(404).json({ error: "Technician not found." });
+        return response.json(database.prepare("SELECT id, name, email, created_at AS createdAt FROM technicians WHERE id = ?").get(id));
+    } catch (error) {
+        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") return response.status(409).json({ error: "That email address is already assigned to a technician." });
+        throw error;
+    }
+});
+
+app.delete("/api/technicians/:id", requireAuth, requireAdmin, (request, response) => {
+    const result = database.prepare("DELETE FROM technicians WHERE id = ?").run(Number(request.params.id));
+    if (!result.changes) return response.status(404).json({ error: "Technician not found." });
+    return response.status(204).end();
 });
 
 function activity(action, text, by = "IT Support Staff") {
@@ -415,24 +508,37 @@ app.get("/api/employees/:id", (request, response) => {
     return response.json(employee);
 });
 
-app.post("/api/employees", (request, response) => {
+app.post("/api/employees", requireAdmin, async (request, response) => {
     const name = typeof request.body.name === "string" ? request.body.name.trim() : "";
     const email = typeof request.body.email === "string" ? request.body.email.trim().toLowerCase() : "";
     const department = typeof request.body.department === "string" ? request.body.department.trim() : "";
     if (name.length < 2) return response.status(400).json({ error: "Employee name must have at least 2 characters." });
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid employee email address." });
     const now = new Date().toISOString();
+    const password = request.body.password;
+    if (password !== undefined && (!email || typeof password !== "string" || password.length < 8)) {
+        return response.status(400).json({ error: "An employee account needs a valid email and password with at least 8 characters." });
+    }
     try {
-        const result = database.prepare("INSERT INTO employees (name, email, department, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
-            .run(name, email, department, now, now);
-        return response.status(201).json(publicEmployee(selectEmployeeById.get(result.lastInsertRowid)));
+        const passwordHash = password ? await hashPassword(password) : null;
+        const createEmployee = database.transaction(() => {
+            const result = database.prepare("INSERT INTO employees (name, email, department, created_at, updated_at) VALUES (?, ?, ?, ?, ?)")
+                .run(name, email, department, now, now);
+            if (passwordHash) {
+                database.prepare("INSERT INTO staff (name, email, password_hash, role, created_at, employee_id) VALUES (?, ?, ?, 'staff', ?, ?)")
+                    .run(name, email.toLowerCase(), passwordHash, now, result.lastInsertRowid);
+            }
+            return result.lastInsertRowid;
+        });
+        const id = createEmployee();
+        return response.status(201).json(publicEmployee(selectEmployeeById.get(id)));
     } catch (error) {
-        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") return response.status(409).json({ error: "An employee with that email already exists." });
+        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") return response.status(409).json({ error: "That email address is already registered to an employee or account." });
         throw error;
     }
 });
 
-app.put("/api/employees/:id", (request, response) => {
+app.put("/api/employees/:id", requireAdmin, (request, response) => {
     const id = Number(request.params.id);
     const current = selectEmployeeById.get(id);
     if (!current) return response.status(404).json({ error: "Employee not found." });
@@ -440,18 +546,23 @@ app.put("/api/employees/:id", (request, response) => {
     const email = typeof request.body.email === "string" ? request.body.email.trim().toLowerCase() : current.email;
     const department = typeof request.body.department === "string" ? request.body.department.trim() : current.department;
     if (name.length < 2) return response.status(400).json({ error: "Employee name must have at least 2 characters." });
+    if (current.has_account && !email) return response.status(400).json({ error: "An employee with a sign-in account must have an email address." });
     if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return response.status(400).json({ error: "Enter a valid employee email address." });
     try {
-        database.prepare("UPDATE employees SET name = ?, email = ?, department = ?, updated_at = ? WHERE id = ?")
-            .run(name, email, department, new Date().toISOString(), id);
+        const updateEmployee = database.transaction(() => {
+            database.prepare("UPDATE employees SET name = ?, email = ?, department = ?, updated_at = ? WHERE id = ?")
+                .run(name, email, department, new Date().toISOString(), id);
+            database.prepare("UPDATE staff SET name = ?, email = ? WHERE employee_id = ?").run(name, email.toLowerCase(), id);
+        });
+        updateEmployee();
         return response.json(publicEmployee(selectEmployeeById.get(id)));
     } catch (error) {
-        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") return response.status(409).json({ error: "An employee with that email already exists." });
+        if (error.code === "SQLITE_CONSTRAINT_UNIQUE") return response.status(409).json({ error: "That email address is already registered to an employee or account." });
         throw error;
     }
 });
 
-app.delete("/api/employees/:id", (request, response) => {
+app.delete("/api/employees/:id", requireAdmin, (request, response) => {
     const result = database.prepare("DELETE FROM employees WHERE id = ?").run(Number(request.params.id));
     if (!result.changes) return response.status(404).json({ error: "Employee not found." });
     return response.status(204).end();
@@ -572,11 +683,15 @@ app.put("/api/tickets/:id", (request, response) => {
     const id = Number(request.params.id);
     const current = fromRow(selectTicketById.get(id));
     if (!current) return response.status(404).json({ error: "Ticket not found." });
+    const nextTechnician = typeof request.body.technician === "string" ? request.body.technician.trim() : current.technician;
+    const assignmentChanged = nextTechnician !== current.technician;
     const updated = normalizeTicket({
         ...current,
         ...request.body,
         id,
-        activity: current.activity,
+        activity: assignmentChanged
+            ? [...current.activity, activity("assignment", nextTechnician ? `Assigned to ${nextTechnician}` : `Unassigned from ${current.technician}`, request.staff.name)]
+            : current.activity,
         comments: current.comments,
         attachments: current.attachments,
     });
